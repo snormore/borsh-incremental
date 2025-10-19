@@ -35,8 +35,8 @@ fn test_truncated_input_defaults_used() {
     let bytes = borsh::to_vec(&data).unwrap();
 
     // Truncate halfway through serialized data
-    let incremental = &bytes[..4]; // only enough for `a`
-    let decoded = T::try_from(incremental).unwrap();
+    let truncated = &bytes[..4]; // only enough for `a`
+    let decoded = T::try_from(truncated).unwrap();
     assert_eq!(decoded, T { a: 1, b: 20, c: 30 });
 }
 
@@ -99,4 +99,138 @@ fn read_bool(data: &mut &[u8]) -> Result<bool, std::io::Error> {
     let b = data[0] != 0;
     *data = &data[1..]; // advance slice
     Ok(b)
+}
+
+#[test]
+fn test_backward_compat_v1_to_v2() {
+    use borsh::BorshSerialize;
+
+    #[derive(BorshSerialize)]
+    struct ExampleV1 {
+        name: String,
+        count: u32,
+    }
+
+    #[derive(BorshDeserializeIncremental, Debug, PartialEq)]
+    // no explicit error → defaults to std::io::Error
+    struct ExampleV2 {
+        #[incremental(default = "Unnamed".to_string())]
+        name: String,
+        count: u32,
+        #[incremental(default = "active".to_string())]
+        status: String, // newly added field in V2
+    }
+
+    let old = ExampleV1 {
+        name: "Alice".into(),
+        count: 5,
+    };
+    let old_bytes = borsh::to_vec(&old).unwrap();
+
+    let v2 = ExampleV2::try_from(&old_bytes[..]).unwrap();
+    assert_eq!(
+        v2,
+        ExampleV2 {
+            name: "Alice".into(),
+            count: 5,
+            status: "active".into()
+        }
+    );
+}
+
+#[test]
+fn test_truncated_input_v2_defaults() {
+    use borsh::BorshSerialize;
+
+    #[derive(BorshSerialize)]
+    struct ExampleV1 {
+        name: String,
+        count: u32,
+    }
+
+    #[derive(BorshDeserializeIncremental, Debug, PartialEq)]
+    struct ExampleV2 {
+        #[incremental(default = "Unnamed".to_string())]
+        name: String,
+        count: u32,
+        #[incremental(default = "active".to_string())]
+        status: String,
+    }
+
+    let old = ExampleV1 {
+        name: "Alice".into(),
+        count: 5,
+    };
+    let old_bytes = borsh::to_vec(&old).unwrap();
+
+    // Truncate aggressively to force defaults for name, count, and status.
+    let truncated = &old_bytes[..4];
+    let v2 = ExampleV2::try_from(truncated).unwrap();
+    assert_eq!(
+        v2,
+        ExampleV2 {
+            name: "Unnamed".into(),
+            count: 0,
+            status: "active".into()
+        }
+    );
+}
+
+#[test]
+fn test_default_error_type_is_io_error() {
+    #[derive(BorshDeserializeIncremental, Debug, PartialEq)]
+    struct E {
+        #[incremental(default = 1)]
+        x: u8,
+    }
+
+    let e = E::try_from(&[][..]).unwrap();
+    assert_eq!(e.x, 1);
+}
+
+#[test]
+fn test_custom_deser_with_consumes_then_defaults() {
+    fn read_one(data: &mut &[u8]) -> Result<u8, std::io::Error> {
+        let v = data.first().copied().unwrap_or(0);
+        if !data.is_empty() {
+            *data = &data[1..];
+        }
+        Ok(v)
+    }
+
+    #[derive(BorshDeserializeIncremental, Debug, PartialEq)]
+    struct C {
+        #[incremental(deser_with = read_one)]
+        head: u8,
+        #[incremental(default = 77)]
+        tail: u8,
+    }
+
+    let buf = [9u8]; // only enough for head
+    let c = C::try_from(&buf[..]).unwrap();
+    assert_eq!(c, C { head: 9, tail: 77 });
+}
+
+#[test]
+fn test_trailing_bytes_ignored() {
+    #[derive(BorshSerialize, BorshDeserializeIncremental, Debug, PartialEq)]
+    struct Z {
+        #[incremental(default = 1)]
+        x: u8,
+    }
+
+    let bytes = [42u8, 99, 100, 101]; // 42 is `x`, rest are extra
+    let z = Z::try_from(&bytes[..]).unwrap();
+    assert_eq!(z, Z { x: 42 });
+}
+
+#[test]
+fn test_option_field_defaults_to_none() {
+    #[derive(BorshDeserializeIncremental, Debug, PartialEq)]
+    struct Opty {
+        v: Option<u32>,
+    } // no #[incremental(default = ...)]
+
+    let o = Opty::try_from(&[][..]).unwrap();
+    assert_eq!(o, Opty { v: None });
 }
